@@ -94,7 +94,7 @@ async function boundedJson(response, operation) {
 }
 
 export function publicationReceipt({ provider, intent, externalId, externalUrl, observedAt, responseDigest } = {}) {
-  if (!['bluesky', 'facebook-page', 'linkedin'].includes(provider)) throw new TypeError("publication receipt provider is not admitted");
+  if (!['bluesky', 'facebook-page', 'linkedin', 'x'].includes(provider)) throw new TypeError("publication receipt provider is not admitted");
   if (!intent || intent.type !== "SocialPublicationIntent" || typeof intent.id !== "string" || !intent.id.startsWith("ni:///sha-256;")) throw new TypeError("publication receipt requires an admitted intent");
   const id = text(externalId, "externalId", { maxBytes: 500 });
   const url = externalUrl === undefined ? undefined : exactUrl(externalUrl, "externalUrl");
@@ -292,4 +292,78 @@ export async function publishLinkedInPost({ authorizedFetch, apiOrigin = "https:
   const postUrn = response.headers.get("x-restli-id");
   if (postUrn === null || !/^urn:li:(?:share|ugcPost):\d+$/u.test(postUrn)) throw new TypeError("LinkedIn Posts returned no exact post URN receipt");
   return Object.freeze({ id: postUrn });
+}
+
+
+/**
+ * POSSE projection for X. The actual canonical article must already have
+ * been accepted, published, and independently observed by the customer.
+ * These pure preflight checks neither decide editorial rights nor create a
+ * post; they always carry the exact original URL back into the short text.
+ *
+ * X counts Unicode and URL characters by its own rules. This conservative
+ * 280-weight bound may reject some valid posts; it never silently truncates a
+ * canonical link or promises eligibility for a particular account or API plan.
+ */
+function conservativeXLength(value) {
+  return [...value].reduce((total, character) =>
+    total + (character.codePointAt(0) > 0x10ff ? 2 : 1), 0);
+}
+
+export function xPostBody({ intent, commentary } = {}) {
+  if (!intent || intent.type !== "SocialPublicationIntent") {
+    throw new TypeError("X POSSE requires an original SocialPublicationIntent");
+  }
+  const canonical = new URL(intent.canonicalUrl);
+  if (canonical.protocol !== "https:" || canonical.username || canonical.password) {
+    throw new TypeError("X POSSE requires a published HTTPS canonical URL");
+  }
+  const message = text(commentary ?? intent.text, "X commentary");
+  const posted = message.includes(canonical.href)
+    ? message : message + "\n\n" + canonical.href;
+  if (conservativeXLength(posted) > 280) {
+    throw new TypeError("X POSSE post exceeds a conservative 280-weight limit; provide authored shorter copy");
+  }
+  return Object.freeze({ text: posted });
+}
+
+/**
+ * The customer's attenuated user-context capability owns authorization.
+ * X's successful CREATE result identifies a submitted remote post, not a
+ * verified public reading, independently accepted delivery, or source update.
+ * The customer's original publication journal must receive the result.
+ *
+ * API source: https://docs.x.com/x-api/posts/create-post
+ */
+export async function publishXPost({
+  authorizedFetch, apiOrigin = "https://api.x.com", body,
+} = {}) {
+  const call = authorizedCapability(authorizedFetch, "X");
+  const origin = serviceOrigin(apiOrigin, "X apiOrigin");
+  if (!body || typeof body !== "object" || Array.isArray(body) ||
+      typeof body.text !== "string" || !body.text.trim() ||
+      conservativeXLength(body.text) > 280) {
+    throw new TypeError("X needs a bounded admitted text post");
+  }
+  const init = {
+    method: "POST", redirect: "error",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({ text: body.text }),
+  };
+  noAuthorization(init.headers);
+  const response = await call(origin + "/2/tweets", init);
+  if (response.status !== 201) {
+    // Keep the original bounded error diagnostics, not a pretend receipt.
+    const raw = await response.text();
+    if (Buffer.byteLength(raw) > MAX_RESPONSE_BYTES) throw new TypeError("X response exceeds the bounded limit");
+    throw new Error("X create post " + response.status + ": " + raw.slice(0, 400));
+  }
+  const payload = await boundedJson(response, "X create post");
+  const id = payload?.data?.id;
+  if (typeof id !== "string" || !/^\d{1,25}$/u.test(id) ||
+      typeof payload.data.text !== "string" ||
+      payload.data.text.length > MAX_TEXT_BYTES) {
+    throw new TypeError("X returned no exact post id and text receipt");
+  }
+  return Object.freeze({ id, text: payload.data.text });
 }

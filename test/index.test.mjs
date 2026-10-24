@@ -12,6 +12,8 @@ import {
   publishLinkedInPost,
   resolveBlueskyHandle,
   uploadBlueskyBlob,
+  xPostBody,
+  publishXPost,
 } from "../src/index.mjs";
 
 function response(body, { status = 200, headers = {} } = {}) {
@@ -97,4 +99,73 @@ test("LinkedIn post publication is versioned, credential-blind, and receipt chec
   assert.equal(seen.init.headers.authorization, undefined);
   assert.equal(seen.init.headers["linkedin-version"], "202609");
   assert.equal(result.id, id);
+});
+
+
+test("X POSSE copy always retains the authored canonical source link", () => {
+  const intent = publicationIntent({
+    canonicalUrl: "https://science.561.group/research/jiangshi-web",
+    text: "Why does a corrected source keep being cited incorrectly?",
+    title: "The Jiangshi Web", description: "Research on accountable Web repair",
+  });
+  const body = xPostBody({ intent });
+  assert.equal(body.text, intent.text + "\n\n" + intent.canonicalUrl);
+  assert.equal(Object.isFrozen(body), true);
+  assert.equal(xPostBody({ intent, commentary: "A short reading: " + intent.canonicalUrl }).text,
+    "A short reading: " + intent.canonicalUrl,
+    "explicit original links must not be duplicated");
+  assert.throws(() => xPostBody({ intent, commentary: "a".repeat(280) }),
+    /conservative 280-weight limit/u, "do not silently truncate an accepted article URL");
+  assert.throws(() => xPostBody({ intent: publicationIntent({
+    canonicalUrl: "http://unpublished.example/draft", text: "Draft",
+  }) }), /published HTTPS canonical/u);
+});
+
+test("X user-context publisher returns only an exact remote CREATE receipt", async () => {
+  const intent = publicationIntent({
+    canonicalUrl: "https://science.561.group/research/jiangshi-web",
+    text: "A source's correction should follow its copies.",
+  });
+  const body = xPostBody({ intent });
+  let call;
+  const id = "1829384756102938475";
+  const result = await publishXPost({
+    body,
+    authorizedFetch: async (url, init) => {
+      call = { url, init };
+      return response({ data: { id, text: body.text } }, { status: 201 });
+    },
+  });
+  assert.equal(call.url, "https://api.x.com/2/tweets");
+  assert.equal(call.init.method, "POST");
+  assert.equal(call.init.redirect, "error");
+  assert.equal(call.init.headers.authorization, undefined, "customer adds OAuth in the attenuated capability");
+  assert.equal(JSON.parse(call.init.body).text, body.text);
+  assert.deepEqual(result, { id, text: body.text });
+  const receipt = publicationReceipt({
+    provider: "x", intent, externalId: result.id, observedAt: "2026-10-22T21:00:00Z",
+  });
+  assert.equal(receipt.provider, "x");
+  assert.equal(receipt.intent, intent.id);
+  assert.ok(receipt.id.startsWith("ni:///sha-256;"));
+});
+
+test("X refuses API errors and malformed receipts without claiming a published URL", async () => {
+  const body = { text: "Valid short canonical link https://science.561.group/" };
+  const call = authorizedFetch => publishXPost({ body, authorizedFetch });
+  await assert.rejects(call(async () => response({ error: "no account authority" }, { status: 403 })),
+    /X create post 403/u);
+  for (const malformed of [
+    { data: { id: "not-a-post", text: body.text } },
+    { data: { id: "12345" } },
+    { data: null },
+  ]) {
+    await assert.rejects(call(async () => response(malformed, { status: 201 })),
+      /exact post id and text/u);
+  }
+  await assert.rejects(publishXPost({ body, authorizedFetch: null }),
+    /attenuated authorizedFetch/u);
+  await assert.rejects(publishXPost({
+    body: { text: "x".repeat(281) }, authorizedFetch: async () => { throw Error("never call provider"); },
+  }), /bounded admitted text/u);
 });

@@ -37,6 +37,15 @@ The service does not log in with a password or own an app password. Authenticati
 
 The service does not own or request Page tokens. The customer capability adds authorization.
 
+### X / Posts API
+
+- optional X POSSE projection from one already admitted `SocialPublicationIntent`;
+- conservatively bounded post text that retains the **canonical HTTPS source URL** without silently truncating it;
+- user-context `POST /2/tweets` through the customer's attenuated `authorizedFetch` capability;
+- exact 201 response and remote post ID checks, then an NI-addressed `SocialPublicationReceipt` under provider `x`.
+
+The provider does not register an X app, possess user access tokens, pay for API access, or verify external public visibility. `xPostBody` assumes the customer already obtained an independently received canonical MOOSE/TUFTE publication and its editor's release authority. A successful X API response is **submission evidence**, not that a human saw the post or that it has been syndicated safely to every target. [Current X API documentation](https://docs.x.com/x-api/posts/create-post) owns eligibility and API changes.
+
 ### LinkedIn
 
 - current `/rest/posts` organic publication shape;
